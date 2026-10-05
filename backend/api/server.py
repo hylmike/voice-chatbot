@@ -1,4 +1,5 @@
 import contextlib
+import json
 import re
 import sys
 from collections.abc import AsyncIterator
@@ -22,7 +23,7 @@ load_dotenv(env_path)
 load_dotenv()
 
 from api.schemas.chat import ChatRequest, ChatResponse
-from api.schemas.events import event_to_dict
+from api.schemas.events import InterruptEvent, VoiceAgentEvent, event_to_dict
 from api.voice_agent.agent import agent, pipeline
 
 app = FastAPI(
@@ -119,8 +120,8 @@ async def chat_endpoint(request: ChatRequest) -> ChatResponse:
     description=(
         "WebSocket endpoint for real-time bi-directional voice agent streaming.\n\n"
         "- **Protocol:** WebSocket (`ws://` or `wss://`)\n"
-        "- **Input:** 16-bit signed PCM audio bytes (16kHz, mono)\n"
-        "- **Output:** Real-time JSON events (`stt_chunk`, `stt_output`, `agent_chunk`, `agent_end`, `tts_chunk`)\n"
+        "- **Input:** 16-bit signed PCM audio bytes (16kHz, mono) or JSON control text (`{'type': 'interrupt'}`)\n"
+        "- **Output:** Real-time JSON events (`speech_started`, `stt_chunk`, `stt_output`, `agent_chunk`, `agent_end`, `tts_chunk`, `interrupt`)\n"
     ),
     tags=["WebSockets"],
 )
@@ -131,7 +132,7 @@ async def websocket_info() -> dict[str, str]:
         "protocol": "websocket",
         "endpoint": "/ws",
         "message": "Connect via WebSocket client (e.g., ws://localhost:3100/ws).",
-        "input_format": "PCM 16-bit mono 16kHz audio bytes",
+        "input_format": "PCM 16-bit mono 16kHz audio bytes or JSON control messages",
         "output_format": "VoiceAgentEvent JSON streaming",
     }
 
@@ -140,21 +141,31 @@ async def websocket_info() -> dict[str, str]:
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
 
-    async def websocket_audio_stream() -> AsyncIterator[bytes]:
-        """Async generator that yields audio bytes from the websocket."""
+    async def websocket_input_stream() -> AsyncIterator[bytes | VoiceAgentEvent]:
+        """Async generator that yields audio bytes or control events from the websocket."""
         try:
             while True:
                 message = await websocket.receive()
                 if message.get("type") == "websocket.disconnect":
                     break
+
+                # Binary PCM audio chunk
                 audio_bytes = message.get("bytes")
                 if isinstance(audio_bytes, bytes) and audio_bytes:
                     yield audio_bytes
+
+                # Text control messages (e.g. {"type": "interrupt"})
+                text_data = message.get("text")
+                if text_data:
+                    with contextlib.suppress(json.JSONDecodeError, KeyError, TypeError):
+                        parsed = json.loads(text_data)
+                        if parsed.get("type") == "interrupt":
+                            yield InterruptEvent.create()
         except WebSocketDisconnect:
             pass
 
     try:
-        output_stream = pipeline.atransform(websocket_audio_stream())
+        output_stream = pipeline.atransform(websocket_input_stream())
 
         # Process all events from the pipeline, send back to client
         async for event in output_stream:

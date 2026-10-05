@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +13,8 @@ from langgraph.checkpoint.memory import InMemorySaver
 from ..schemas.events import (
     AgentChunkEvent,
     AgentEndEvent,
+    InterruptEvent,
+    SpeechStartedEvent,
     STTOutputEvent,
     ToolCallEvent,
     ToolResultEvent,
@@ -45,78 +49,108 @@ agent = create_agent(
 )
 
 
-async def agent_stream(
+async def agent_stream(  # noqa: PLR0915
     event_stream: AsyncIterator[VoiceAgentEvent],
 ) -> AsyncIterator[VoiceAgentEvent]:
     """Transform stream: Voice Events → Voice Events (with Agent Responses)
 
-    This function takes a stream of upstream voice agent events and processes them.
-    When a stt_output event arrives, it passes the transcript to the LangChain agent.
-    The agent streams back its response tokens as agent_chunk events.
-    Tool calls and results are also emitted as separate events.
-    All others upstream events are passed through unchanged.
-
-    The passthrough pattern ensures downstream stages (like TTS) can observe all
-    events in the pipeline, not just the ones this stage produces. This enables
-    features like displaying partial transcripts while the agent is thinking.
-
-    Args:
-        event_stream: An async iterator of upstream voice agent events
-
-    Yields:
-        All upstream events plus agent_chunk, tool_call, and tool_result events
+    Runs event reading concurrently with agent generation to enable instant
+    interruption (barge-in) and turn cancellation.
+    - When SpeechStartedEvent arrives (user starts speaking), any active agent
+      generation is cancelled immediately.
+    - When InterruptEvent arrives (user interrupts), active agent generation is cancelled.
+    - When STTOutputEvent arrives, active generation is cancelled and the new turn begins.
     """
-    # Generate a unique thread ID for this conversation session
-    # This allows the agent to maintain conversation context across multiple turns
-    # using the checkpointer (InMemorySaver) configured in the agent
     thread_id = str(uuid4())
+    out_queue: asyncio.Queue[VoiceAgentEvent | object] = asyncio.Queue()
+    sentinel = object()
+    active_agent_task: asyncio.Task | None = None
 
-    # Process each event as it arrives from the upstream STT stage
-    async for event in event_stream:
-        # Pass through all events to downstream consumers
-        yield event
-
-        # When we receive a final transcript, invoke the agent
-        if isinstance(event, STTOutputEvent):
-            # Stream the agent's response using LangChain's astream method.
-            # stream_mode="messages" yields message chunks as they're generated.
+    async def run_agent(transcript: str) -> None:
+        try:
             config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
             stream = agent.astream(
-                {"messages": [HumanMessage(content=event.transcript)]},
+                {"messages": [HumanMessage(content=transcript)]},
                 config=config,
                 stream_mode="messages",
             )
 
-            # Iterate through the agent's streaming response. The stream yields
-            # tuples of (message, metadata), but we only need the message.
             async for message, _metadata in stream:
-                # Emit agent chunks (AI messages)
                 if isinstance(message, AIMessage):
-                    # Extract and yield the text content from each message chunk
                     if message.text:
-                        yield AgentChunkEvent.create(message.text)
-                    # Emit tool calls if present
+                        await out_queue.put(AgentChunkEvent.create(message.text))
                     if hasattr(message, "tool_calls") and message.tool_calls:
                         for tool_call in message.tool_calls:
                             tool_id = tool_call.get("id") or str(uuid4())
                             tool_name = tool_call.get("name") or "unknown"
                             tool_args = tool_call.get("args") or {}
-                            yield ToolCallEvent.create(
-                                tool_id=str(tool_id),
-                                name=str(tool_name),
-                                args=tool_args if isinstance(tool_args, dict) else {},
+                            await out_queue.put(
+                                ToolCallEvent.create(
+                                    tool_id=str(tool_id),
+                                    name=str(tool_name),
+                                    args=tool_args if isinstance(tool_args, dict) else {},
+                                )
                             )
 
-                # Emit tool results (tool messages)
                 if isinstance(message, ToolMessage):
-                    yield ToolResultEvent.create(
-                        tool_call_id=getattr(message, "tool_call_id", None) or "",
-                        name=getattr(message, "name", None) or "unknown",
-                        result=str(message.content) if message.content else "",
+                    await out_queue.put(
+                        ToolResultEvent.create(
+                            tool_call_id=getattr(message, "tool_call_id", None) or "",
+                            name=getattr(message, "name", None) or "unknown",
+                            result=str(message.content) if message.content else "",
+                        )
                     )
 
-            # Signal that the agent has finished responding for this turn
-            yield AgentEndEvent.create()
+            await out_queue.put(AgentEndEvent.create())
+        except asyncio.CancelledError:
+            # Turn was interrupted mid-generation
+            raise
+        except Exception as e:  # noqa: BLE001
+            print(f"[ERROR] Agent execution error: {e}")
+            await out_queue.put(AgentEndEvent.create())
+
+    async def cancel_active_agent() -> None:
+        nonlocal active_agent_task
+        if active_agent_task and not active_agent_task.done():
+            active_agent_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await active_agent_task
+        active_agent_task = None
+
+    async def process_upstream_events() -> None:
+        nonlocal active_agent_task
+        try:
+            async for event in event_stream:
+                # Barge-in or explicit interrupt: cancel active agent generation immediately
+                if isinstance(event, (SpeechStartedEvent, InterruptEvent)):
+                    await cancel_active_agent()
+                    await out_queue.put(event)
+                    continue
+
+                # Pass through all other events downstream
+                await out_queue.put(event)
+
+                # When a final user transcript arrives, cancel any leftover task & start new response
+                if isinstance(event, STTOutputEvent):
+                    await cancel_active_agent()
+                    active_agent_task = asyncio.create_task(run_agent(event.transcript))
+        finally:
+            await cancel_active_agent()
+            await out_queue.put(sentinel)
+
+    process_task = asyncio.create_task(process_upstream_events())
+
+    try:
+        while True:
+            item = await out_queue.get()
+            if item is sentinel:
+                break
+            yield item  # type: ignore[misc]
+    finally:
+        process_task.cancel()
+        await cancel_active_agent()
+        with contextlib.suppress(asyncio.CancelledError):
+            await process_task
 
 
 pipeline = (

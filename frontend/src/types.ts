@@ -25,6 +25,8 @@ export interface Thread {
 
 export type VoiceEvent =
   | { type: 'user_input'; ts: number }
+  | { type: 'speech_started'; ts: number }
+  | { type: 'interrupt'; ts: number }
   | { type: 'stt_chunk'; transcript: string; ts: number }
   | { type: 'stt_output'; transcript: string; ts: number }
   | { type: 'agent_chunk'; text: string; ts: number }

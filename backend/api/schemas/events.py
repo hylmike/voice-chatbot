@@ -58,6 +58,43 @@ class UserInputEvent(BaseEvent):
         return cls(type="user_input", audio=audio, ts=_now_ms())
 
 
+class SpeechStartedEvent(BaseEvent):
+    """Event emitted by STT Voice Activity Detection (VAD) when user speech begins.
+
+    This signal is fired immediately when the user begins speaking, allowing
+    downstream consumers (agent, TTS, and frontend playback) to detect barge-in
+    and interrupt ongoing speech without waiting for a completed transcript.
+    """
+
+    type: Literal["speech_started"] = Field(
+        default="speech_started",
+        description="Event type identifier.",
+    )
+
+    @classmethod
+    def create(cls) -> "SpeechStartedEvent":
+        """Factory method to create SpeechStartedEvent with current timestamp."""
+        return cls(type="speech_started", ts=_now_ms())
+
+
+class InterruptEvent(BaseEvent):
+    """Event emitted when an active assistant response is interrupted.
+
+    Triggered either by user speech barge-in (SpeechStarted) or an explicit
+    interrupt action from the client.
+    """
+
+    type: Literal["interrupt"] = Field(
+        default="interrupt",
+        description="Event type identifier.",
+    )
+
+    @classmethod
+    def create(cls) -> "InterruptEvent":
+        """Factory method to create InterruptEvent with current timestamp."""
+        return cls(type="interrupt", ts=_now_ms())
+
+
 class STTChunkEvent(BaseEvent):
     """Event emitted during speech-to-text processing for partial transcription results.
 
@@ -111,7 +148,7 @@ class STTOutputEvent(BaseEvent):
         return cls(type="stt_output", transcript=transcript, ts=_now_ms())
 
 
-STTEvent = STTChunkEvent | STTOutputEvent
+STTEvent = SpeechStartedEvent | STTChunkEvent | STTOutputEvent
 
 
 class AgentChunkEvent(BaseEvent):
@@ -162,8 +199,7 @@ class ToolCallEvent(BaseEvent):
     """Event emitted when the agent invokes a tool.
 
     This event provides visibility into the agent's decision-making process,
-    showing which tools are being called and with what arguments.
-    """
+    showing which tools are being called and with what arguments."""
 
     type: Literal["tool_call"] = Field(
         default="tool_call",
@@ -192,8 +228,7 @@ class ToolResultEvent(BaseEvent):
     """Event emitted when a tool completes execution and returns a result.
 
     This event contains the output from the tool, allowing tracking of
-    the full tool execution lifecycle.
-    """
+    the full tool execution lifecycle."""
 
     type: Literal["tool_result"] = Field(
         default="tool_result",
@@ -262,13 +297,18 @@ class TTSChunkEvent(BaseEvent):
         return cls(type="tts_chunk", audio=audio, ts=_now_ms())
 
 
-VoiceAgentEvent = UserInputEvent | STTEvent | AgentEvent | TTSChunkEvent
+VoiceAgentEvent = UserInputEvent | STTEvent | AgentEvent | TTSChunkEvent | InterruptEvent
 
 
 def event_to_dict(event: VoiceAgentEvent) -> dict:
     """Convert a VoiceAgentEvent to a JSON-serializable dictionary."""
     match event:
-        case UserInputEvent(type=t, ts=ts) | AgentEndEvent(type=t, ts=ts):
+        case (
+            UserInputEvent(type=t, ts=ts)
+            | AgentEndEvent(type=t, ts=ts)
+            | SpeechStartedEvent(type=t, ts=ts)
+            | InterruptEvent(type=t, ts=ts)
+        ):
             return {"type": t, "ts": ts}
         case (
             STTChunkEvent(type=t, transcript=transcript, ts=ts)
@@ -312,9 +352,11 @@ __all__ = [
     "BaseEvent",
     "ChatRequest",
     "ChatResponse",
+    "InterruptEvent",
     "STTChunkEvent",
     "STTEvent",
     "STTOutputEvent",
+    "SpeechStartedEvent",
     "TTSChunkEvent",
     "ToolCallEvent",
     "ToolResultEvent",

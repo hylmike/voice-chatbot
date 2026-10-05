@@ -1,10 +1,10 @@
 """AssemblyAI Real-Time Streaming STT Transform
 
-Python implementation that mirrors the TypeScript AssemblyAISTTTransform.
-Connects to AssemblyAI's v3 WebSocket API for streaming speech-to-text.
+Connects to AssemblyAI's Streaming v3 WebSocket API for speech-to-text,
+VAD (Voice Activity Detection), and semantic turn detection.
 
-Input: PCM 16-bit audio buffer (bytes)
-Output: STT events (stt_chunk for partials, stt_output for final transcripts)
+Input: PCM 16-bit audio buffer (bytes) or VoiceAgentEvent (passthrough)
+Output: STT events (speech_started for VAD barge-in, stt_chunk for partials, stt_output for final transcripts)
 """
 
 import asyncio
@@ -18,15 +18,25 @@ from urllib.parse import urlencode
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from ..schemas.events import STTChunkEvent, STTEvent, STTOutputEvent, VoiceAgentEvent
+from ..schemas.events import (
+    BaseEvent,
+    SpeechStartedEvent,
+    STTChunkEvent,
+    STTEvent,
+    STTOutputEvent,
+    VoiceAgentEvent,
+)
 
 
 class AssemblyAISTT:
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917
         self,
         api_key: str | None = None,
         sample_rate: int = 16000,
         format_turns: bool = True,
+        speech_model: str = "universal-3-6-pro",
+        min_turn_silence: int = 200,
+        max_turn_silence: int = 1000,
     ) -> None:
         self.api_key = api_key or os.getenv("ASSEMBLYAI_API_KEY")
         if not self.api_key:
@@ -34,13 +44,22 @@ class AssemblyAISTT:
 
         self.sample_rate = sample_rate
         self.format_turns = format_turns
+        self.speech_model = speech_model
+        self.min_turn_silence = min_turn_silence
+        self.max_turn_silence = max_turn_silence
         self._ws: ClientConnection | None = None
         self._connection_signal = asyncio.Event()
         self._close_signal = asyncio.Event()
         self._last_completed_turn_order: int | None = None
 
     def _parse_message(self, message: dict[str, Any]) -> STTEvent | None:
-        if message.get("type") != "Turn":
+        msg_type = message.get("type")
+
+        # Instant VAD signal when user starts speaking (barge-in trigger)
+        if msg_type == "SpeechStarted":
+            return SpeechStartedEvent.create()
+
+        if msg_type != "Turn":
             return None
 
         transcript = str(message.get("transcript") or "").strip()
@@ -120,8 +139,11 @@ class AssemblyAISTT:
 
         params = urlencode(
             {
+                "speech_model": self.speech_model,
                 "sample_rate": self.sample_rate,
                 "format_turns": str(self.format_turns).lower(),
+                "min_turn_silence": self.min_turn_silence,
+                "max_turn_silence": self.max_turn_silence,
             }
         )
         url = f"wss://streaming.assemblyai.com/v3/ws?{params}"
@@ -132,61 +154,56 @@ class AssemblyAISTT:
 
 
 async def stt_stream(
-    audio_stream: AsyncIterator[bytes],
+    audio_stream: AsyncIterator[bytes | VoiceAgentEvent],
 ) -> AsyncIterator[VoiceAgentEvent]:
+    """Transform stream: Audio / Control Events → Voice Events
+
+    Connects to AssemblyAI v3 streaming WebSocket with VAD and turn detection.
+    - Yields SpeechStartedEvent when user voice activity begins (barge-in).
+    - Yields STTChunkEvent for partial transcripts during speaking.
+    - Yields STTOutputEvent for finalized conversation turns.
+    - Passes through non-audio control events (e.g. InterruptEvent) concurrently.
     """
-    Transform stream: Audio (Bytes) → Voice Events (VoiceAgentEvent)
+    stt = AssemblyAISTT(
+        sample_rate=16000,
+        speech_model="universal-3-6-pro",
+        min_turn_silence=200,
+        max_turn_silence=1000,
+    )
+    out_queue: asyncio.Queue[VoiceAgentEvent | object] = asyncio.Queue()
+    sentinel = object()
 
-    This function takes a stream of audio chunks and sends them to AssemblyAI for STT.
-
-    It uses a producer-consumer pattern where:
-    - Producer: A background task reads audio chunks from audio_stream and sends
-      them to AssemblyAI via WebSocket. This runs concurrently with the consumer,
-      allowing transcription to begin before all audio has arrived.
-    - Consumer: The main coroutine receives transcription events from AssemblyAI
-      and yields them downstream. Events include both partial results (stt_chunk)
-      and final transcripts (stt_output).
-
-    Args:
-        audio_stream: Async iterator of PCM audio bytes (16-bit, mono, 16kHz)
-
-    Yields:
-        STT events (stt_chunk for partials, stt_output for final transcripts)
-    """
-
-    stt = AssemblyAISTT(sample_rate=16000)
-
-    async def send_audio():
-        """
-        Background task that pumps audio chunks to AssemblyAI.
-
-        This runs concurrently with the main coroutine, continuously reading
-        audio chunks from the input stream and forwarding them to AssemblyAI.
-        When the input stream ends, it signals completion by closing the
-        WebSocket connection.
-        """
-
+    async def send_audio_producer() -> None:
         try:
-            # stream each audio chunk to AssemblyAI as it arrives
-            async for audio_chunk in audio_stream:
-                await stt.send_audio(audio_chunk)
+            async for item in audio_stream:
+                if isinstance(item, bytes):
+                    await stt.send_audio(item)
+                elif isinstance(item, BaseEvent):
+                    await out_queue.put(item)
         finally:
             await stt.close()
 
-    # Launch the audio sending task in the background
-    # This allows us to simultaneously receive transcripts in the main coroutine
-    send_task = asyncio.create_task(send_audio())
+    async def receive_transcripts_consumer() -> None:
+        try:
+            async for event in stt.receive_events():
+                await out_queue.put(event)
+        finally:
+            await out_queue.put(sentinel)
+
+    send_task = asyncio.create_task(send_audio_producer())
+    recv_task = asyncio.create_task(receive_transcripts_consumer())
 
     try:
-        # Consumer loop: receive and yield transcription events as they arrive
-        # from AssemblyAI. The receive_events() method listens on the WebSocket
-        # for transcript events and yields them as they become available.
-        async for event in stt.receive_events():
-            yield event
+        while True:
+            item = await out_queue.get()
+            if item is sentinel:
+                break
+            yield item  # type: ignore[misc]
     finally:
-        # Cleanup: ensure the background task is canceled and awaited
+        send_task.cancel()
+        recv_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            send_task.cancel()
             await send_task
-        # Ensure the websocket connection is closed
+        with contextlib.suppress(asyncio.CancelledError):
+            await recv_task
         await stt.close()

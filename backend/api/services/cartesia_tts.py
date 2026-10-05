@@ -3,8 +3,8 @@
 Python implementation of Cartesia's Sonic streaming TTS API.
 Converts text to PCM audio in real-time using WebSocket streaming.
 
-Input: Text strings
-Output: TTS events (tts_chunk for audio chunks)
+Input: Text strings / VoiceAgentEvent
+Output: TTS events (tts_chunk for audio chunks, plus passthrough events)
 """
 
 import asyncio
@@ -22,6 +22,8 @@ from websockets.exceptions import ConnectionClosed
 from ..schemas.events import (
     AgentChunkEvent,
     AgentEndEvent,
+    InterruptEvent,
+    SpeechStartedEvent,
     TTSChunkEvent,
     VoiceAgentEvent,
 )
@@ -109,6 +111,12 @@ class CartesiaTTS:
         }
         await ws.send(json.dumps(payload))
 
+    async def cancel(self) -> None:
+        """Cancel ongoing TTS generation immediately by resetting the active WebSocket."""
+        if self._ws is not None and self._ws.close_code is None:
+            await self._ws.close()
+        self._ws = None
+
     async def receive_events(self) -> AsyncIterator[TTSChunkEvent]:
         while not self._close_signal.is_set():
             _, pending = await asyncio.wait(
@@ -144,7 +152,7 @@ class CartesiaTTS:
                             print(f"[DEBUG] Cartesia JSON decode error: {e}")
                             continue
                 except ConnectionClosed:
-                    print("Cartesia: WebSocket connection closed")
+                    pass
                 finally:
                     if self._ws is not None and self._ws.close_code is None:
                         await self._ws.close()
@@ -177,58 +185,32 @@ class CartesiaTTS:
 async def tts_stream(
     event_stream: AsyncIterator[VoiceAgentEvent],
 ) -> AsyncIterator[VoiceAgentEvent]:
+    """Transform stream: Voice Events → Voice Events (with Audio)
+
+    Processes upstream events, synthesizes TTS audio chunks, and supports
+    instant barge-in / interrupt cancellation.
     """
-    Transform stream: Voice Events → Voice Events (with Audio)
-
-    This function takes a stream of upstream voice agent events and processes them.
-    When agent_chunk events arrive, it sends the text to Cartesia for TTS synthesis.
-    Audio is streamed back as tts_chunk events as it's generated.
-    All upstream events are passed through unchanged.
-
-    It uses merge_async_iters to combine two concurrent streams:
-    - process_upstream(): Iterates through incoming events, yields them for
-      passthrough, and sends agent text chunks to Cartesia for synthesis.
-    - tts.receive_events(): Yields audio chunks from Cartesia as they are
-      synthesized.
-
-    The merge utility runs both iterators concurrently, yielding items from
-    either stream as they become available. This allows audio generation to
-    begin before the agent has finished generating all text, minimizing latency.
-
-    Args:
-        event_stream: An async iterator of upstream voice agent events
-
-    Yields:
-        All upstream events plus tts_chunk events for synthesized audio
-    """
-
     tts = CartesiaTTS()
 
     async def process_upstream() -> AsyncIterator[VoiceAgentEvent]:
-        """
-        Process upstream events, yielding them while sending text to Cartesia.
-
-        This async generator serves two purposes:
-        1. Pass through all upstream events (stt_chunk, stt_output, agent_chunk)
-           so downstream consumers can observe the full event stream.
-        2. Buffer agent_chunk text and send to Cartesia when agent_end arrives.
-           This ensures the full response is sent at once for better TTS quality.
-        """
-
         buffer: list[str] = []
         async for event in event_stream:
-            # Pass through all events to downstream consumers
+            # Handle barge-in / explicit interrupt: clear text and abort ongoing synthesis
+            if isinstance(event, (InterruptEvent, SpeechStartedEvent)):
+                buffer = []
+                await tts.cancel()
+                yield event
+                continue
+
             yield event
-            # Buffer agent text chunks
+
             if isinstance(event, AgentChunkEvent):
                 buffer.append(event.text)
-            elif isinstance(event, AgentEndEvent):
+            elif isinstance(event, AgentEndEvent) and buffer:
                 await tts.send_text("".join(buffer))
                 buffer = []
 
     try:
-        # Merge the processed upstream events with TTS audio events
-        # Both streams run concurrently, yielding events as they arrive
         async for stream_event in merge_async_iters(
             process_upstream(), tts.receive_events()
         ):

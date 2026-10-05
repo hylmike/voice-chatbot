@@ -34,6 +34,8 @@ export function App() {
 
   const wsRef = useRef<WebSocket | null>(null)
   const animFrameRef = useRef<number | null>(null)
+  const currentEpochRef = useRef(0)
+  const activeTurnEpochRef = useRef(0)
 
   // Periodic health check
   useEffect(() => {
@@ -69,6 +71,22 @@ export function App() {
   const handleVoiceEvent = useCallback(
     (event: VoiceEvent) => {
       switch (event.type) {
+        case 'speech_started':
+          // Barge-in: user began speaking. Immediately halt audio and invalidate ongoing turn
+          currentEpochRef.current += 1
+          audioManager.stopPlayback()
+          setIsSpeaking(false)
+          setIsStreaming(false)
+          break
+
+        case 'interrupt':
+          // Server confirmed turn interruption
+          currentEpochRef.current += 1
+          audioManager.stopPlayback()
+          setIsSpeaking(false)
+          setIsStreaming(false)
+          break
+
         case 'stt_chunk':
           setInterimTranscript(event.transcript)
           break
@@ -76,6 +94,11 @@ export function App() {
         case 'stt_output':
           setInterimTranscript('')
           if (event.transcript.trim()) {
+            currentEpochRef.current += 1
+            activeTurnEpochRef.current = currentEpochRef.current
+            audioManager.stopPlayback()
+            setIsSpeaking(false)
+
             addMessage({
               role: 'user',
               content: event.transcript,
@@ -110,7 +133,10 @@ export function App() {
           break
 
         case 'tts_chunk':
-          audioManager.playTTSChunk(event.audio)
+          // Drop stale TTS chunks from interrupted or prior turns
+          if (currentEpochRef.current === activeTurnEpochRef.current) {
+            audioManager.playTTSChunk(event.audio)
+          }
           break
 
         case 'agent_end':
@@ -135,6 +161,7 @@ export function App() {
     setIsSpeaking(false)
     setInterimTranscript('')
     setIsStreaming(false)
+    currentEpochRef.current += 1
     audioManager.stopRecording()
     audioManager.stopPlayback()
 
@@ -228,8 +255,15 @@ export function App() {
   }
 
   const handleStopPlayback = () => {
+    currentEpochRef.current += 1
     audioManager.stopPlayback()
     setIsSpeaking(false)
+    setIsStreaming(false)
+
+    // Notify backend WebSocket to cancel agent generation and TTS streaming
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'interrupt' }))
+    }
   }
 
   return (
