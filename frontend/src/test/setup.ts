@@ -1,0 +1,28 @@
+// Vitest setup file
+import { afterEach, vi } from 'vitest'
+import { cleanup } from '@testing-library/react'
+
+// Automatically unmount React trees after each test
+afterEach(() => {
+  cleanup()
+  vi.clearAllMocks()
+})
+
+// Mock window.matchMedia
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: vi.fn().mockImplementation((query) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })),
+})
+
+// Mock requestAnimationFrame / cancelAnimationFrame
+window.requestAnimationFrame = vi.fn().mockImplementation((cb) => setTimeout(cb, 16))
+window.cancelAnimationFrame = vi.fn().mockImplementation((id) => clearTimeout(id))

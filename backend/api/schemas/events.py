@@ -297,7 +297,9 @@ class TTSChunkEvent(BaseEvent):
         return cls(type="tts_chunk", audio=audio, ts=_now_ms())
 
 
-VoiceAgentEvent = UserInputEvent | STTEvent | AgentEvent | TTSChunkEvent | InterruptEvent
+VoiceAgentEvent = (
+    UserInputEvent | STTEvent | AgentEvent | TTSChunkEvent | InterruptEvent
+)
 
 
 def event_to_dict(event: VoiceAgentEvent) -> dict:

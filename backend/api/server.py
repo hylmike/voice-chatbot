@@ -50,9 +50,7 @@ def _clean_ssml_tags(text: str) -> str:
 def _extract_response_text(message: AIMessage) -> str:
     """Extract plain text response from LangChain AIMessage."""
     raw_text = ""
-    if hasattr(message, "text") and message.text:
-        raw_text = message.text
-    elif isinstance(message.content, str):
+    if isinstance(message.content, str) and message.content:
         raw_text = message.content
     elif isinstance(message.content, list):
         parts = []
@@ -62,6 +60,8 @@ def _extract_response_text(message: AIMessage) -> str:
             elif isinstance(part, dict) and "text" in part:
                 parts.append(str(part["text"]))
         raw_text = "".join(parts)
+    elif hasattr(message, "text") and message.text:
+        raw_text = message.text
     else:
         raw_text = str(message.content or "")
     return _clean_ssml_tags(raw_text)

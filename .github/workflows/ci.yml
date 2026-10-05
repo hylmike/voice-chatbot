@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-ci:
+    name: Backend (Format, Lint & Tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          version: "latest"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Check code formatting (Ruff)
+        run: uv run ruff format --check .
+
+      - name: Lint code (Ruff)
+        run: uv run ruff check .
+
+      - name: Run unit tests with coverage (Pytest)
+        env:
+          GOOGLE_API_KEY: "mock_google_key"
+          ASSEMBLYAI_API_KEY: "mock_assemblyai_key"
+          CARTESIA_API_KEY: "mock_cartesia_key"
+          TAVILY_API_KEY: "mock_tavily_key"
+        run: uv run pytest --cov=api --cov-report=term-missing
+
+  frontend-ci:
+    name: Frontend (Lint, Build & Tests)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable Corepack & Yarn
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      - name: Lint code (oxlint)
+        run: yarn workspace frontend lint
+
+      - name: Typecheck and Build (TypeScript & Vite)
+        run: yarn workspace frontend build
+
+      - name: Run unit tests with coverage (Vitest)
+        run: yarn workspace frontend test:coverage

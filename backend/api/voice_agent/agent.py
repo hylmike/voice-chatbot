@@ -88,7 +88,9 @@ async def agent_stream(  # noqa: PLR0915
                                 ToolCallEvent.create(
                                     tool_id=str(tool_id),
                                     name=str(tool_name),
-                                    args=tool_args if isinstance(tool_args, dict) else {},
+                                    args=tool_args
+                                    if isinstance(tool_args, dict)
+                                    else {},
                                 )
                             )
 
@@ -135,7 +137,9 @@ async def agent_stream(  # noqa: PLR0915
                     await cancel_active_agent()
                     active_agent_task = asyncio.create_task(run_agent(event.transcript))
         finally:
-            await cancel_active_agent()
+            if active_agent_task and not active_agent_task.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await active_agent_task
             await out_queue.put(sentinel)
 
     process_task = asyncio.create_task(process_upstream_events())
