@@ -22,6 +22,20 @@ interface ChatCanvasProps {
   isVoiceActive: boolean
 }
 
+/**
+ * Filter out SSML and XML tags (such as <break time="300ms"/>, <spell>, etc.)
+ * so raw voice-synthesis tags never render in the visual chat UI.
+ */
+function cleanDisplayContent(text: string): string {
+  if (!text) return ''
+  return text
+    .replace(/<break\b[^>]*\/?>/gi, ' ')
+    .replace(/<\/?(?:spell|speed|volume|emotion)\b[^>]*\/?>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/<[a-zA-Z][^>]*$/, '')
+    .replace(/[ \t]{2,}/g, ' ')
+}
+
 export function ChatCanvas({
   thread,
   onClearThread,
@@ -110,6 +124,7 @@ export function ChatCanvas({
 
         {thread?.messages.map((msg: Message) => {
           const isUser = msg.role === 'user'
+          const displayContent = isUser ? msg.content : cleanDisplayContent(msg.content)
 
           return (
             <div
@@ -140,7 +155,7 @@ export function ChatCanvas({
                     ) : (
                       <>
                         <Sparkles className="w-3 h-3 text-indigo-400" />
-                        EchoVoice AI
+                        Lingxi AI
                       </>
                     )}
                   </span>
@@ -195,9 +210,9 @@ export function ChatCanvas({
                 {/* Message Content */}
                 <div className="prose prose-invert prose-sm max-w-none break-words">
                   {isUser ? (
-                    <p className="whitespace-pre-wrap m-0">{msg.content}</p>
+                    <p className="whitespace-pre-wrap m-0">{displayContent}</p>
                   ) : (
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    <ReactMarkdown>{displayContent}</ReactMarkdown>
                   )}
                 </div>
 
@@ -220,7 +235,7 @@ export function ChatCanvas({
                     </div>
 
                     <button
-                      onClick={() => copyToClipboard(msg.content, msg.id)}
+                      onClick={() => copyToClipboard(displayContent, msg.id)}
                       className="p-1 hover:text-white rounded hover:bg-zinc-800 transition-colors"
                       title="Copy response"
                     >

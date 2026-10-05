@@ -22,7 +22,7 @@ function createDefaultThread(): Thread {
       {
         id: generateId(),
         role: 'assistant',
-        content: "Hello! I am your AI assistant. You can chat with me using text or switch to voice mode using the microphone icon.",
+        content: "Hello! I am Lingxi AI, your assistant. You can chat with me using text or switch to voice mode using the microphone icon.",
         timestamp: Date.now(),
         status: 'done',
       },

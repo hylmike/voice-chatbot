@@ -1,4 +1,4 @@
-# EchoVoice AI - Real-Time Voice & Text Chatbot
+# Lingxi AI - Real-Time Voice & Text Chatbot
 
 A full-duplex, real-time conversational voice and text AI application powered by **Google Gemini 3.7 Flash**, **AssemblyAI Streaming STT**, **Cartesia Sonic TTS**, and **Tavily Web Search**.
 

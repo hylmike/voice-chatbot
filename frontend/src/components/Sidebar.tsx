@@ -158,8 +158,8 @@ export function Sidebar({
               <Radio className="w-4 h-4 text-white animate-pulse" />
             </div>
             <div>
-              <h1 className="text-base font-semibold text-white tracking-tight leading-none">EchoVoice AI</h1>
-              <p className="text-[11px] text-zinc-400 mt-0.5">Gemini + Voice Agent</p>
+              <h1 className="text-base font-semibold text-white tracking-tight leading-none">Lingxi AI</h1>
+              <p className="text-[11px] text-zinc-400 mt-0.5">Text + Voice Agent</p>
             </div>
           </div>
         )}

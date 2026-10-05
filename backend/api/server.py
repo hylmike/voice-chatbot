@@ -1,4 +1,5 @@
 import contextlib
+import re
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -25,7 +26,7 @@ from api.schemas.events import event_to_dict
 from api.voice_agent.agent import agent, pipeline
 
 app = FastAPI(
-    title="Voice Agent API",
+    title="Lingxi AI API",
     description="Real-time voice chatbot backend with AssemblyAI STT, Gemini Agent, and Cartesia TTS.",
     version="0.1.0",
 )
@@ -39,21 +40,30 @@ app.add_middleware(
 )
 
 
+def _clean_ssml_tags(text: str) -> str:
+    """Strip XML/SSML tags like <break time="..."/> from the text."""
+    cleaned = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+
 def _extract_response_text(message: AIMessage) -> str:
     """Extract plain text response from LangChain AIMessage."""
+    raw_text = ""
     if hasattr(message, "text") and message.text:
-        return message.text
-    if isinstance(message.content, str):
-        return message.content
-    if isinstance(message.content, list):
+        raw_text = message.text
+    elif isinstance(message.content, str):
+        raw_text = message.content
+    elif isinstance(message.content, list):
         parts = []
         for part in message.content:
             if isinstance(part, str):
                 parts.append(part)
             elif isinstance(part, dict) and "text" in part:
                 parts.append(str(part["text"]))
-        return "".join(parts)
-    return str(message.content or "")
+        raw_text = "".join(parts)
+    else:
+        raw_text = str(message.content or "")
+    return _clean_ssml_tags(raw_text)
 
 
 @app.get("/health", tags=["System"])
