@@ -37,22 +37,31 @@ class AssemblyAISTT:
         self._ws: ClientConnection | None = None
         self._connection_signal = asyncio.Event()
         self._close_signal = asyncio.Event()
+        self._last_completed_turn_order: int | None = None
 
-    @staticmethod
-    def _parse_message(message: dict[str, Any]) -> STTEvent | None:
-        message_type = message.get("type")
-        if message_type != "Turn":
+    def _parse_message(self, message: dict[str, Any]) -> STTEvent | None:
+        if message.get("type") != "Turn":
             return None
 
-        transcript = message.get("transcript", "")
-        turn_is_formatted = message.get("turn_is_formatted", False)
-
-        if turn_is_formatted:
-            if transcript:
-                return STTOutputEvent.create(transcript)
+        transcript = str(message.get("transcript") or "").strip()
+        if not transcript:
             return None
 
-        return STTChunkEvent.create(transcript)
+        end_of_turn = bool(message.get("end_of_turn", False))
+        turn_is_formatted = bool(message.get("turn_is_formatted", False))
+        turn_order = message.get("turn_order")
+
+        # In-progress speech or awaiting final formatting
+        if not end_of_turn or (self.format_turns and not turn_is_formatted):
+            return STTChunkEvent.create(transcript)
+
+        # Completed turn: deduplicate against the last completed turn order
+        if turn_order is not None and turn_order == self._last_completed_turn_order:
+            return None
+
+        if turn_order is not None:
+            self._last_completed_turn_order = turn_order
+        return STTOutputEvent.create(transcript)
 
     async def receive_events(self) -> AsyncIterator[STTEvent]:
         while not self._close_signal.is_set():
@@ -98,6 +107,7 @@ class AssemblyAISTT:
         if self._ws is not None and self._ws.close_code is None:
             await self._ws.close()
         self._ws = None
+        self._last_completed_turn_order = None
         self._close_signal.set()
 
     async def _ensure_connection(self) -> ClientConnection:
