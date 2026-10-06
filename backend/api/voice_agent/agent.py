@@ -22,7 +22,7 @@ from ..schemas.events import (
 )
 from ..services.assemblyai_stt import stt_stream
 from ..services.cartesia_prompts import CARTESIA_TTS_SYSTEM_PROMPT
-from ..services.cartesia_tts import tts_stream
+from ..services.speechifyai_tts import tts_stream
 from .tools import tavily_search
 
 env_path = Path(__file__).resolve().parents[2] / ".env"

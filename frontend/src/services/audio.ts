@@ -1,6 +1,6 @@
 /**
  * Audio service handling microphone capture (16kHz PCM),
- * audio playback for Cartesia TTS (24kHz PCM), and visualizer analysis.
+ * audio playback for Cartesia/Speechify TTS (24kHz PCM), and visualizer analysis.
  */
 
 export class AudioManager {
@@ -15,6 +15,7 @@ export class AudioManager {
   private nextPlayTime = 0
   private activeSources: AudioBufferSourceNode[] = []
   private isRecording = false
+  private pcmRemainder: number | null = null
 
   /**
    * Start recording from the microphone and stream 16kHz mono PCM chunks.
@@ -93,7 +94,7 @@ export class AudioManager {
   }
 
   /**
-   * Play a chunk of base64-encoded 24kHz PCM audio from Cartesia TTS.
+   * Play a chunk of base64-encoded 24kHz PCM audio from Cartesia or Speechify TTS.
    */
   async playTTSChunk(base64Audio: string): Promise<void> {
     try {
@@ -115,14 +116,31 @@ export class AudioManager {
 
       // Decode base64 to binary
       const binaryString = atob(base64Audio)
-      const len = binaryString.length
-      const bytes = new Uint8Array(len)
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryString.charCodeAt(i)
+      const rawLen = binaryString.length
+      if (rawLen === 0) return
+
+      // Prepend leftover byte from previous chunk if present to preserve 16-bit PCM sample alignment
+      const hasRemainder = this.pcmRemainder !== null
+      const totalLen = (hasRemainder ? 1 : 0) + rawLen
+      const bytes = new Uint8Array(totalLen)
+      let offset = 0
+      if (hasRemainder) {
+        bytes[0] = this.pcmRemainder!
+        offset = 1
+        this.pcmRemainder = null
+      }
+      for (let i = 0; i < rawLen; i++) {
+        bytes[offset + i] = binaryString.charCodeAt(i)
       }
 
-      // Convert 16-bit PCM little endian to Float32
-      const numSamples = Math.floor(len / 2)
+      // Retain trailing odd byte for next chunk if length is odd
+      if (bytes.length % 2 !== 0) {
+        this.pcmRemainder = bytes[bytes.length - 1]
+      }
+
+      const numSamples = Math.floor(bytes.length / 2)
+      if (numSamples === 0) return
+
       const float32 = new Float32Array(numSamples)
       const dataView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
@@ -131,7 +149,7 @@ export class AudioManager {
         float32[i] = int16 / 32768.0
       }
 
-      // Create audio buffer at 24000Hz (Cartesia sonic sample rate)
+      // Create audio buffer at 24000Hz
       const audioBuffer = this.outputAudioCtx.createBuffer(1, numSamples, 24000)
       audioBuffer.getChannelData(0).set(float32)
 
@@ -160,6 +178,7 @@ export class AudioManager {
    * Stop all active and scheduled audio playback immediately.
    */
   stopPlayback(): void {
+    this.pcmRemainder = null
     for (const source of this.activeSources) {
       try {
         source.stop()
