@@ -4,6 +4,7 @@ import asyncio
 import base64
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from api.schemas.events import (
@@ -67,6 +68,9 @@ def test_parse_message() -> None:
     assert isinstance(event3, TTSChunkEvent)
     assert event3.audio == raw_audio
 
+    # Invalid base64 string
+    assert SpeechifyTTS._parse_message({"data": "invalid_base64!!!"}) is None
+
     # Missing or empty data
     assert SpeechifyTTS._parse_message({"data": ""}) is None
     assert SpeechifyTTS._parse_message({}) is None
@@ -114,6 +118,13 @@ async def test_send_text_empty() -> None:
         await tts.send_text("")
         await tts.send_text("   ")
         mock_ensure.assert_not_called()
+
+
+async def test_send_text_after_close() -> None:
+    tts = SpeechifyTTS(api_key="test_key")
+    await tts.close()
+    with pytest.raises(RuntimeError, match="after it was closed"):
+        await tts.send_text("Hello")
 
 
 async def test_send_text_valid() -> None:
@@ -165,6 +176,32 @@ async def test_receive_events_streaming() -> None:
     assert received[1].audio == b"chunk_02"
 
 
+async def test_receive_events_trailing_buffer() -> None:
+    tts = SpeechifyTTS(api_key="test_key", chunk_size=8)
+
+    mock_response = AsyncMock()
+    mock_response.is_error = False
+
+    async def mock_aiter_bytes():
+        # 11 bytes: 8 bytes full chunk + 3 bytes remainder (rounded down to 2 bytes for 16-bit PCM)
+        yield b"12345678abc"
+
+    mock_response.aiter_bytes = mock_aiter_bytes
+    tts._active_response = mock_response
+    tts._connection_signal.set()
+
+    received = []
+    async for event in tts.receive_events():
+        received.append(event)
+        if len(received) == 2:
+            break
+
+    await tts.close()
+    assert len(received) == 2
+    assert received[0].audio == b"12345678"
+    assert received[1].audio == b"ab"
+
+
 async def test_receive_events_error_response() -> None:
     tts = SpeechifyTTS(api_key="test_key")
 
@@ -187,6 +224,65 @@ async def test_receive_events_error_response() -> None:
     await task
 
     assert len(events) == 0
+
+
+async def test_receive_events_stream_closed_during_cancellation() -> None:
+    tts = SpeechifyTTS(api_key="test_key", chunk_size=8)
+
+    mock_response = AsyncMock()
+    mock_response.is_error = False
+
+    async def mock_aiter_bytes():
+        yield b"chunk_01"
+        await tts.cancel()
+        raise httpx.StreamClosed()
+
+    mock_response.aiter_bytes = mock_aiter_bytes
+    tts._active_response = mock_response
+    tts._connection_signal.set()
+
+    received = []
+
+    async def run_receive():
+        async for event in tts.receive_events():
+            received.append(event)
+
+    task = asyncio.create_task(run_receive())
+    await asyncio.sleep(0.01)
+    await tts.close()
+    await task
+
+    assert len(received) == 1
+    assert received[0].audio == b"chunk_01"
+
+
+async def test_receive_events_unexpected_stream_error_uncancelled() -> None:
+    tts = SpeechifyTTS(api_key="test_key", chunk_size=8)
+
+    mock_response = AsyncMock()
+    mock_response.is_error = False
+
+    async def mock_aiter_bytes():
+        yield b"chunk_01"
+        raise httpx.ReadError("Network connection abruptly dropped")
+
+    mock_response.aiter_bytes = mock_aiter_bytes
+    tts._active_response = mock_response
+    tts._connection_signal.set()
+
+    received = []
+
+    async def run_receive():
+        async for event in tts.receive_events():
+            received.append(event)
+
+    task = asyncio.create_task(run_receive())
+    await asyncio.sleep(0.01)
+    await tts.close()
+    await task
+
+    assert len(received) == 1
+    assert received[0].audio == b"chunk_01"
 
 
 async def test_tts_stream_buffering_and_interruption() -> None:
@@ -229,3 +325,45 @@ async def test_tts_stream_buffering_and_interruption() -> None:
         # verify cancel was called on interrupt and speech_started
         assert mock_tts_instance.cancel.await_count == 2
         mock_tts_instance.close.assert_awaited_once()
+
+
+async def test_merge_async_iters_with_speechify_stream_closed_on_interrupt() -> None:
+    tts = SpeechifyTTS(api_key="test_key", chunk_size=8)
+
+    mock_client = AsyncMock()
+    mock_client.build_request = MagicMock()
+    mock_response = AsyncMock()
+    mock_response.is_error = False
+
+    async def mock_aiter_bytes():
+        yield b"chunk_01"
+        while not tts._cancel_signal.is_set():
+            await asyncio.sleep(0.001)
+        raise httpx.StreamClosed()
+
+    mock_response.aiter_bytes = mock_aiter_bytes
+    mock_client.send = AsyncMock(return_value=mock_response)
+
+    async def mock_ensure():
+        return mock_client
+
+    tts._ensure_client = mock_ensure
+
+    async def input_events():
+        yield AgentChunkEvent.create("Hello")
+        yield AgentEndEvent.create()
+        await asyncio.sleep(0.01)
+        yield SpeechStartedEvent.create()
+
+    events = []
+    with patch("api.services.speechifyai_tts.SpeechifyTTS", return_value=tts):
+        async for e in tts_stream(input_events()):
+            events.append(e)
+            if isinstance(e, SpeechStartedEvent):
+                break
+
+    types = [e.type for e in events]
+    assert "agent_chunk" in types
+    assert "agent_end" in types
+    assert "tts_chunk" in types
+    assert "speech_started" in types
