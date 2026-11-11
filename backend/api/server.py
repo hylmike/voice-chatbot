@@ -28,7 +28,7 @@ from api.voice_agent.agent import agent, pipeline
 
 app = FastAPI(
     title="Lingxi AI API",
-    description="Real-time voice chatbot backend with AssemblyAI STT, Gemini Agent, and Cartesia TTS.",
+    description="Real-time voice chatbot backend with Deepgram Flux STT, Gemini Agent, and Deepgram Flux TTS.",
     version="0.1.0",
 )
 

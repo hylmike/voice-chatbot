@@ -46,8 +46,7 @@ jobs:
       - name: Run unit tests with coverage (Pytest)
         env:
           GOOGLE_API_KEY: "mock_google_key"
-          ASSEMBLYAI_API_KEY: "mock_assemblyai_key"
-          CARTESIA_API_KEY: "mock_cartesia_key"
+          DEEPGRAM_API_KEY: "mock_deepgram_key"
           TAVILY_API_KEY: "mock_tavily_key"
         run: uv run pytest --cov=api --cov-report=term-missing
 

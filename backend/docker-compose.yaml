@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: backend
-    container_name: voice_chatbot_backend
+    container_name: deepgram_voice_agent_backend
     ports:
       - "3100:3100"
     env_file:

@@ -20,9 +20,9 @@ from ..schemas.events import (
     ToolResultEvent,
     VoiceAgentEvent,
 )
-from ..services.assemblyai_stt import stt_stream
-from ..services.cartesia_prompts import CARTESIA_TTS_SYSTEM_PROMPT
-from ..services.speechifyai_tts import tts_stream
+from ..services.deepgram_prompts import DEEPGRAM_TTS_SYSTEM_PROMPT
+from ..services.deepgram_stt import stt_stream
+from ..services.deepgram_tts import tts_stream
 from .tools import tavily_search
 
 env_path = Path(__file__).resolve().parents[2] / ".env"
@@ -38,7 +38,7 @@ You have access to the `tavily_search` web search tool to find current informati
 - Keep your spoken responses concise and conversational (typically 1 to 3 sentences) unless the user specifically asks for more detail.
 - Speak in plain text suitable for both voice output and screen display. Do not use markdown formatting (such as bolding, asterisks, bullet points, or headers), never include raw XML or SSML tags (such as <break .../>, <speed .../>, or <spell>), and never read raw URLs out loud. Rely on standard punctuation (commas, periods) for natural pauses.
 
-{CARTESIA_TTS_SYSTEM_PROMPT}
+{DEEPGRAM_TTS_SYSTEM_PROMPT}
 """
 
 agent = create_agent(

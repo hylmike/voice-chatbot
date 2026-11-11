@@ -84,6 +84,9 @@ checkpoints/
 .vscode/
 *.code-workspace
 
+# Agent skills
+skills/
+
 # Temporary editor files
 *.swp
 *.swo
