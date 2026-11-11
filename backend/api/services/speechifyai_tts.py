@@ -170,8 +170,7 @@ class SpeechifyTTS:
         self._cancel_signal.set()
         self._connection_signal.clear()
         if self._active_response is not None:
-            with contextlib.suppress(httpx.HTTPError, httpx.StreamError):
-                await self._active_response.aclose()
+            await self._active_response.aclose()
             self._active_response = None
 
     async def _stream_response_chunks(
@@ -179,21 +178,16 @@ class SpeechifyTTS:
     ) -> AsyncIterator[TTSChunkEvent]:
         """Stream chunks from HTTP response buffered to even 16-bit PCM boundaries."""
         buffer = bytearray()
-        try:
-            async for raw_chunk in response.aiter_bytes():
-                if self._cancel_signal.is_set():
-                    break
-                buffer.extend(raw_chunk)
-                while len(buffer) >= self.chunk_size:
-                    chunk_to_send = bytes(buffer[: self.chunk_size])
-                    buffer = buffer[self.chunk_size :]
-                    event = self._parse_chunk(chunk_to_send)
-                    if event is not None:
-                        yield event
-        except (httpx.HTTPError, httpx.StreamError):
-            if not self._cancel_signal.is_set():
-                raise
-            return
+        async for raw_chunk in response.aiter_bytes():
+            if self._cancel_signal.is_set():
+                break
+            buffer.extend(raw_chunk)
+            while len(buffer) >= self.chunk_size:
+                chunk_to_send = bytes(buffer[: self.chunk_size])
+                buffer = buffer[self.chunk_size :]
+                event = self._parse_chunk(chunk_to_send)
+                if event is not None:
+                    yield event
 
         if buffer and not self._cancel_signal.is_set():
             valid_len = len(buffer) - (len(buffer) % 2)
@@ -232,11 +226,10 @@ class SpeechifyTTS:
                     else:
                         async for event in self._stream_response_chunks(response):
                             yield event
-                except (httpx.HTTPError, httpx.StreamError, asyncio.CancelledError):
+                except (httpx.HTTPError, asyncio.CancelledError):
                     pass
                 finally:
-                    with contextlib.suppress(httpx.HTTPError, httpx.StreamError):
-                        await response.aclose()
+                    await response.aclose()
                     if self._active_response is response:
                         self._active_response = None
 
@@ -244,8 +237,7 @@ class SpeechifyTTS:
         """Close active streams and HTTP client."""
         await self.cancel()
         if self._client is not None and not self._client.is_closed:
-            with contextlib.suppress(httpx.HTTPError, httpx.StreamError):
-                await self._client.aclose()
+            await self._client.aclose()
         self._client = None
         self._close_signal.set()
 
